@@ -2,12 +2,11 @@ package delayqueue
 
 import (
 	"context"
-	"log"
+	"encoding/base64"
 	"math"
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/snowflake"
 	"github.com/google/orderedcode"
 	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
@@ -16,7 +15,9 @@ import (
 )
 
 var (
-	UnknownTs  = int64(-1)
+	// unable to determine the min ts
+	UnknownTs = int64(-1)
+	// indecated no pending msg now
 	MaxTs      = int64(math.MaxInt64)
 	BucketName = []byte("delayqueue")
 )
@@ -30,9 +31,10 @@ func New(cfg *Config) (*DelayQueue, error) {
 	if err := d.init(); err != nil {
 		return nil, errors.Wrap(err, "delayqueue init error")
 	}
-	if err := d.run(); err != nil {
+	if err := d.start(); err != nil {
 		return nil, errors.Wrap(err, "delayqueue run error")
 	}
+	d.minTs = UnknownTs
 	return d, nil
 }
 
@@ -41,7 +43,7 @@ type DelayQueue struct {
 	natsConn *nats.Conn
 	natsJs   nats.JetStreamContext
 	bbolt    *bbolt.DB
-	idgen    *snowflake.Node
+	//idgen    *snowflake.Node
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,14 +54,17 @@ type DelayQueue struct {
 
 func (me *DelayQueue) init() error {
 	var err error
+	/**
 	me.idgen, err = snowflake.NewNode(0)
 	if err != nil {
 		return errors.Wrap(err, "idgen create error")
 	}
+	*/
 	me.bbolt, err = bbolt.Open(me.cfg.Bbolt.Path, 0600, &bbolt.Options{})
 	if err != nil {
 		return errors.Wrap(err, "bbolt open error")
 	}
+	// ensure bucket exists
 	me.bbolt.Update(func(tx *bbolt.Tx) error {
 		_, err := tx.CreateBucket(BucketName)
 		return err
@@ -90,7 +95,7 @@ func (me *DelayQueue) init() error {
 	return nil
 }
 
-func (me *DelayQueue) run() error {
+func (me *DelayQueue) start() error {
 	me.wg.Add(2)
 	go func() {
 		me.readloop()
@@ -148,6 +153,7 @@ func (me *DelayQueue) readloop() {
 			nmsgs, err := sub.Fetch(100, nats.MaxWait(time.Second))
 			if err != nil {
 				if err != nats.ErrTimeout {
+					//@todo there may be no messages error, not real error.
 					me.cfg.Logger.Warn("error", errors.Wrapf(err, "Fetch msg error"))
 					time.Sleep(time.Second * 3)
 					continue
@@ -158,9 +164,9 @@ func (me *DelayQueue) readloop() {
 			for _, nmsg := range nmsgs {
 				msg := &protos.DelayMessage{}
 				if err := msg.Decode(nmsg.Data); err != nil {
-					me.cfg.Logger.Warn("error", errors.Wrapf(err, "decode msg error"), "msgData", nmsg.Data)
+					me.cfg.Logger.Warn("error", errors.Wrapf(err, "msg.Decode.Error"), "msgData", nmsg.Data)
 				} else {
-					log.Println("pulled: ", string(msg.Encode()))
+					me.cfg.Logger.Debugw("msg.Pulled", "msgData", msg)
 					msgs = append(msgs, msg)
 					if minTs == UnknownTs || msg.Ts < minTs {
 						minTs = msg.Ts
@@ -170,6 +176,8 @@ func (me *DelayQueue) readloop() {
 			err = me.bbolt.Update(func(tx *bbolt.Tx) error {
 				bucket := tx.Bucket(BucketName)
 				for _, msg := range msgs {
+					//msgKey := me.genMsgKey(msg)
+					//log.Println("msgKey, ", string(msgKey))
 					err := bucket.Put(me.genMsgKey(msg), msg.Encode())
 					if err != nil {
 						return err
@@ -196,9 +204,6 @@ func (me *DelayQueue) readloop() {
 	}
 }
 
-/**
-从数据库取完所有值，
-*/
 func (me *DelayQueue) writeloop() {
 	tk := time.NewTicker(time.Millisecond * 1000)
 	for range tk.C {
@@ -214,15 +219,15 @@ func (me *DelayQueue) writeloop() {
 		if minTs != UnknownTs && ts < minTs {
 			continue
 		}
-		log.Printf("ts: %v, minTs: %v\n", ts, minTs)
 		for {
 			select {
 			case <-me.ctx.Done():
 				return
 			default:
 			}
-			stop := false
-			msgsKeys := [][]byte{}
+			// break loop when time not reached or no more msg in bbolt
+			breakLoop := false
+			msgKeys := [][]byte{}
 			msgs := []*protos.DelayMessage{}
 			ts = time.Now().Unix()
 			minTs := UnknownTs
@@ -232,20 +237,22 @@ func (me *DelayQueue) writeloop() {
 				i := 0
 				for k, v := c.First(); k != nil; k, v = c.Next() {
 					msg := &protos.DelayMessage{}
-					msgsKeys = append(msgsKeys, k)
 					if err := msg.Decode(v); err != nil {
-						// log
+						msgKeys = append(msgKeys, k)
+						me.cfg.Logger.Warnf("msg.Invalid.Error", "error", err, "msgData", v)
 					} else {
 						if msg.Subject == "" {
-							// log
+							msgKeys = append(msgKeys, k)
+							me.cfg.Logger.Warnf("msg.Invalid.Error: subject empty", "error", err, "msgData", msg)
 						} else {
 							if msg.Ts <= ts {
-								msg.Key = string(k)
+								msgKeys = append(msgKeys, k)
+								msg.Key = base64.StdEncoding.EncodeToString(k)
 								msgs = append(msgs, msg)
 							} else {
 								minTs = msg.Ts
-								stop = true
-								break
+								breakLoop = true
+								return nil
 							}
 						}
 					}
@@ -255,13 +262,17 @@ func (me *DelayQueue) writeloop() {
 					}
 				}
 				minTs = MaxTs
-				stop = true
+				breakLoop = true
 				return nil
 			})
+			if err != nil {
+				// err but not care
+				me.cfg.Logger.Info("bbolt.View.Error", "error", err)
+			}
 			err = nil
 			if len(msgs) > 0 {
 				for _, msg := range msgs {
-					log.Println("pub: ", string(msg.Encode()))
+					me.cfg.Logger.Debugw("msgPubed", "msgData", msg)
 					h := nats.Header{}
 					h.Set("Nats-Msg-Id", msg.Key)
 					nmsg := &nats.Msg{
@@ -281,21 +292,26 @@ func (me *DelayQueue) writeloop() {
 				}
 			}
 			if err != nil {
+				me.cfg.Logger.Warn("error", err)
+				time.Sleep(time.Second * 3)
 				continue
 			}
 			err = me.bbolt.Update(func(tx *bbolt.Tx) error {
 				bucket := tx.Bucket(BucketName)
-				for _, k := range msgsKeys {
-					bucket.Delete(k)
+				for _, k := range msgKeys {
+					err := bucket.Delete(k)
+					if err != nil {
+						return errors.Wrapf(err, "bbolt.Delete.Error")
+					}
 				}
 				return nil
 			})
 			if err != nil {
+				me.cfg.Logger.Warnf("bbolt.Update.Error", "error", err)
 				time.Sleep(time.Second * 3)
 				continue
 			}
-			if stop {
-
+			if breakLoop {
 				if minTs != UnknownTs {
 					me.mutex.Lock()
 					if minTs < me.minTs || me.minTs == UnknownTs {
@@ -312,6 +328,6 @@ func (me *DelayQueue) writeloop() {
 }
 
 func (me *DelayQueue) genMsgKey(msg *protos.DelayMessage) []byte {
-	b, _ := orderedcode.Append(nil, msg.Ts, me.idgen.Generate().Int64())
+	b, _ := orderedcode.Append(nil, msg.Ts, time.Now().UnixNano())
 	return b
 }

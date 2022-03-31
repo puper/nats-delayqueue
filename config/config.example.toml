@@ -1,5 +1,5 @@
 [log.default]
-    level = "info"
+    level = "debug"
     traceLevel = "warn"
     output = "/app/logs/default.log"
     maxSize = 100

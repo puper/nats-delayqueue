@@ -1,10 +1,10 @@
-# a delayqueue sidecar for nats' jetstream(IN DEVELOPING STAGE)
+# a delayqueue sidecar for nats' jetstream
 
 # usage
 - create delay stream and consumer manually.
 - update config/config.toml
 - go run main.go serve --config=config/config.toml
-- send msg by js
+- send msg as you do before but sent to the delayqueue
 
 ```
 	msg := &protos.DelayMessage{
