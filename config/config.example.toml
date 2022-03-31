@@ -1,0 +1,21 @@
+[log.default]
+    level = "info"
+    traceLevel = "warn"
+    output = "/app/logs/default.log"
+    maxSize = 100
+    maxAge = 30
+    maxBackups = 7
+    compress = true
+    initialFields = ["app", "delayqueue"]
+    format = "json"
+
+[delayqueue.nats]
+    url = "nats://127.0.0.1:4222"
+    username = ""
+    password = ""
+    streamName = "delayqueue"
+    consumerName = "delayqueue"
+    subject = "delayqueue"
+
+[delayqueue.bbolt]
+    path = "/app/files/bbolt.db"
