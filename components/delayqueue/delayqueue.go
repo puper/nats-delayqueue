@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/orderedcode"
@@ -50,6 +51,7 @@ type DelayQueue struct {
 	wg     sync.WaitGroup
 	mutex  sync.RWMutex
 	minTs  int64
+	seq    int64
 }
 
 func (me *DelayQueue) init() error {
@@ -178,6 +180,8 @@ func (me *DelayQueue) readloop() {
 				for _, msg := range msgs {
 					//msgKey := me.genMsgKey(msg)
 					//log.Println("msgKey, ", string(msgKey))
+					//msgKeys[base64.StdEncoding.EncodeToString(msgKey)] = true
+					//err := bucket.Put(msgKey, msg.Encode())
 					err := bucket.Put(me.genMsgKey(msg), msg.Encode())
 					if err != nil {
 						return err
@@ -185,6 +189,8 @@ func (me *DelayQueue) readloop() {
 				}
 				return nil
 			})
+			//msgkl += len(msgKeys)
+			//log.Println("msgkl", msgkl)
 			if err != nil {
 				me.cfg.Logger.Warn("error", errors.Wrapf(err, "bboltdb save msg error"))
 				for _, nmsg := range nmsgs {
@@ -205,6 +211,7 @@ func (me *DelayQueue) readloop() {
 }
 
 func (me *DelayQueue) writeloop() {
+	//x := 0
 	tk := time.NewTicker(time.Millisecond * 300)
 	for range tk.C {
 		select {
@@ -246,6 +253,8 @@ func (me *DelayQueue) writeloop() {
 							me.cfg.Logger.Warnf("msg.Invalid.Error: subject empty", "error", err, "msgData", msg)
 						} else {
 							if msg.Ts <= ts {
+								//x++
+								//log.Println("pub: ", x)
 								msgKeys = append(msgKeys, k)
 								msg.Key = base64.StdEncoding.EncodeToString(k)
 								msgs = append(msgs, msg)
@@ -261,6 +270,7 @@ func (me *DelayQueue) writeloop() {
 						return nil
 					}
 				}
+				//log.Println("empty")
 				minTs = MaxTs
 				breakLoop = true
 				return nil
@@ -356,6 +366,6 @@ func (me *DelayQueue) writeloop() {
 }
 
 func (me *DelayQueue) genMsgKey(msg *protos.DelayMessage) []byte {
-	b, _ := orderedcode.Append(nil, msg.Ts, time.Now().UnixNano())
+	b, _ := orderedcode.Append(nil, msg.Ts, time.Now().Unix(), atomic.AddInt64(&me.seq, 1))
 	return b
 }
