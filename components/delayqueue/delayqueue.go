@@ -205,7 +205,7 @@ func (me *DelayQueue) readloop() {
 }
 
 func (me *DelayQueue) writeloop() {
-	tk := time.NewTicker(time.Millisecond * 1000)
+	tk := time.NewTicker(time.Millisecond * 300)
 	for range tk.C {
 		select {
 		case <-me.ctx.Done():
@@ -270,7 +270,9 @@ func (me *DelayQueue) writeloop() {
 				me.cfg.Logger.Info("bbolt.View.Error", "error", err)
 			}
 			err = nil
+			errMsgKeys := map[string]bool{}
 			if len(msgs) > 0 {
+				//acks := map[string]nats.PubAckFuture{}
 				for _, msg := range msgs {
 					me.cfg.Logger.Debugw("msgPubed", "msgData", msg)
 					h := nats.Header{}
@@ -280,25 +282,51 @@ func (me *DelayQueue) writeloop() {
 						Data:    msg.Data,
 						Header:  h,
 					}
-					me.natsJs.PublishMsgAsync(nmsg)
+					//ack, err := me.natsJs.PublishMsgAsync(nmsg)
+					_, err := me.natsJs.PublishMsgAsync(nmsg)
+					if err != nil {
+						errMsgKeys[msg.Key] = true
+						me.cfg.Logger.Warnf("msg.Pub.Error", "error", err)
+					} else {
+						//acks[msg.Key] = ack
+					}
 				}
-				tk := time.NewTicker(time.Second * 30)
-				select {
-				case <-me.natsJs.PublishAsyncComplete():
-					tk.Stop()
-				case <-tk.C:
-					err = errors.New("publish msg timeout")
-					tk.Stop()
+				/**
+				tm := time.NewTimer(time.Second * 10)
+				for msgKey, ack := range acks {
+					if tm.Stop() {
+						select {
+						case err := <-ack.Err():
+							log.Println("ackErr:", err)
+							errMsgKeys[msgKey] = true
+						case <-ack.Ok():
+						default:
+							errMsgKeys[msgKey] = true
+						}
+						continue
+					}
+					select {
+					case err := <-ack.Err():
+						log.Println("ackErr:", err)
+						errMsgKeys[msgKey] = true
+					case <-ack.Ok():
+						log.Println("accOk")
+					case <-tm.C:
+						errMsgKeys[msgKey] = true
+					}
 				}
-			}
-			if err != nil {
-				me.cfg.Logger.Warn("error", err)
-				time.Sleep(time.Second * 3)
-				continue
+				if !tm.Stop() {
+					tm.Stop()
+				}
+				tm.Stop()
+				*/
 			}
 			err = me.bbolt.Update(func(tx *bbolt.Tx) error {
 				bucket := tx.Bucket(BucketName)
 				for _, k := range msgKeys {
+					if errMsgKeys[base64.StdEncoding.EncodeToString(k)] {
+						continue
+					}
 					err := bucket.Delete(k)
 					if err != nil {
 						return errors.Wrapf(err, "bbolt.Delete.Error")
@@ -312,7 +340,7 @@ func (me *DelayQueue) writeloop() {
 				continue
 			}
 			if breakLoop {
-				if minTs != UnknownTs {
+				if minTs != UnknownTs && len(errMsgKeys) == 0 {
 					me.mutex.Lock()
 					if minTs < me.minTs || me.minTs == UnknownTs {
 						me.minTs = minTs
