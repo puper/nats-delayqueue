@@ -285,6 +285,7 @@ func (me *DelayQueue) writeloop() {
 				//acks := map[string]nats.PubAckFuture{}
 				for _, msg := range msgs {
 					me.cfg.Logger.Debugw("msgPubed", "msgData", msg)
+					/**
 					h := nats.Header{}
 					h.Set("Nats-Msg-Id", msg.Key)
 					nmsg := &nats.Msg{
@@ -294,6 +295,8 @@ func (me *DelayQueue) writeloop() {
 					}
 					//ack, err := me.natsJs.PublishMsgAsync(nmsg)
 					_, err := me.natsJs.PublishMsgAsync(nmsg)
+					*/
+					_, err := me.natsJs.PublishAsync(msg.Subject, msg.Data, nats.MsgId(msg.Key))
 					if err != nil {
 						errMsgKeys[msg.Key] = true
 						me.cfg.Logger.Warnf("msg.Pub.Error", "error", err)
