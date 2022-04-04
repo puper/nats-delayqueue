@@ -216,6 +216,7 @@ func (me *DelayQueue) writeloop() {
 	for range tk.C {
 		select {
 		case <-me.ctx.Done():
+			tk.Stop()
 			return
 		default:
 		}
